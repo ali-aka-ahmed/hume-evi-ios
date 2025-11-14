@@ -14,7 +14,7 @@ struct Swift_EVIChatApp: App {
     var body: some Scene {
         WindowGroup {
             EVIChatView(
-                apiKey: "O3hkbte3bLrfUSgLGHwC3S75G83GuAvGszlMlWYn9ArAoYUk",
+                apiKey: "O3hkbte3bLrfUSgLGHwC3S75G83GuAvGszlMlWYn9ArAoYUk [try this now it's invalid hehe]",
                 configId: ""
             )
         }
