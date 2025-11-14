@@ -57,29 +57,59 @@ final class AudioService: NSObject, AudioServiceProtocol, AVAudioPlayerDelegate 
     // MARK: - Initialization
     override init() {
         self.inputNode = audioEngine.inputNode
-        self.nativeInputFormat = inputNode.inputFormat(forBus: 0)
         
         super.init()
         
-        setupAudioEngine()
-        setupAudioSession()
+        // Don't do any audio setup in init() to avoid deadlocks during app initialization
+        // All audio setup will be deferred until start() is called
     }
     
     // MARK: - Public Methods
     func start() throws {
         guard !isRunning else { return }
         
-        do {
-            print("🎧 Starting audio engine...")
-            try audioEngine.start()
-            print("✅ Audio engine started")
-            print("🎤 Starting recording...")
-            startRecording()
-            print("✅ Recording started")
-            isRunning = true
-        } catch {
-            print("❌ Failed to start audio engine: \(error)")
-            throw AudioServiceError.engineStartFailed
+        // Ensure we're on the main thread for all audio operations
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                try? self?.start()
+            }
+            return
+        }
+        
+        // Setup audio session first (only when actually needed)
+        setupAudioSession()
+        
+        // Small async delay to let session stabilize before setting up engine
+        // This avoids RPC timeouts and deadlocks
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self, !self.isRunning else { return }
+            
+            do {
+                // Setup audio engine now - ensure session is active and format is valid
+                // If setup fails (e.g., simulator), we'll skip engine start but not crash
+                let setupSuccess = self.setupAudioEngine()
+                
+                guard setupSuccess else {
+                    print("⚠️ Audio engine setup incomplete - continuing without audio capture")
+                    // Don't throw error - allow app to continue
+                    self.isRunning = true
+                    return
+                }
+                
+                print("🎧 Starting audio engine...")
+                try self.audioEngine.start()
+                print("✅ Audio engine started")
+                print("🎤 Starting recording...")
+                self.startRecording()
+                print("✅ Recording started")
+                self.isRunning = true
+            } catch {
+                print("❌ Failed to start audio engine: \(error)")
+                // If we're on simulator or audio isn't available, don't crash - just log
+                print("⚠️ Continuing without audio capture")
+                self.isRunning = true
+                // Don't throw - allow app to continue
+            }
         }
     }
     
@@ -88,6 +118,7 @@ final class AudioService: NSObject, AudioServiceProtocol, AVAudioPlayerDelegate 
         
         inputNode.removeTap(onBus: 0)
         audioEngine.stop()
+        audioEngine.disconnectNodeInput(inputNode)
         handleInterruption()
         isRunning = false
     }
@@ -133,23 +164,50 @@ final class AudioService: NSObject, AudioServiceProtocol, AVAudioPlayerDelegate 
         }
     }
     
-    private func setupAudioEngine() {
-            print("🎛️ Setting up audio engine...")
-            
-            let mainMixer = audioEngine.mainMixerNode
-            print("   - Main mixer format: \(mainMixer.outputFormat(forBus: 0))")
-            
-            if let inputFormat = nativeInputFormat {
-                print("   - Connecting input with format: \(inputFormat)")
-                audioEngine.connect(inputNode, to: mainMixer, format: inputFormat)
-                print("✅ Input connected to mixer")
-            } else {
-                print("❌ No input format available")
-            }
-            
-            audioEngine.prepare()
-            print("✅ Audio engine prepared")
+    private func setupAudioEngine() -> Bool {
+        // All audio engine operations MUST happen on the main thread
+        guard Thread.isMainThread else {
+            print("❌ setupAudioEngine() must be called on main thread")
+            return false
         }
+        
+        print("🎛️ Setting up audio engine...")
+        
+        // Ensure audio session is active (already set up in start(), but verify)
+        do {
+            try audioSession.setActive(true)
+        } catch {
+            print("⚠️ Failed to activate audio session: \(error)")
+            return false
+        }
+        
+        // Re-capture input format after session is active
+        let inputFormat = inputNode.inputFormat(forBus: 0)
+        self.nativeInputFormat = inputFormat
+        
+        let mainMixer = audioEngine.mainMixerNode
+        print("   - Main mixer format: \(mainMixer.outputFormat(forBus: 0))")
+        print("   - Input format: \(inputFormat)")
+        
+        // Validate format before connecting
+        guard inputFormat.channelCount > 0 && inputFormat.sampleRate > 0 else {
+            print("❌ No valid input format available (channels: \(inputFormat.channelCount), sampleRate: \(inputFormat.sampleRate))")
+            print("   This might be a simulator issue - audio input may not be available")
+            return false
+        }
+        
+        // Disconnect if already connected (idempotent)
+        audioEngine.disconnectNodeInput(inputNode)
+        
+        // Connect input to mixer
+        print("   - Connecting input with format: \(inputFormat)")
+        audioEngine.connect(inputNode, to: mainMixer, format: inputFormat)
+        print("✅ Input connected to mixer")
+        
+        audioEngine.prepare()
+        print("✅ Audio engine prepared")
+        return true
+    }
     
     private func setupAudioSessionOld() {
         do {
